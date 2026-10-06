@@ -24,17 +24,25 @@ clippy with warnings denied passed. These small sequences do not establish
 general conformance, reverse decoding, real-time throughput or Chuzz support.
 
 The VP9 adapter does not expose the upstream encoder's process-environment
-controls as crate settings. However, `rusty_vp9` reads many inherited `VP9_*`
-variables during configuration and encoding. These can change activity
+controls as crate settings. `Vp9Encoder::new()` and every `encode_frame()`
+call reject the presence of any environment variable whose name begins with
+`VP9_`, without printing its name or value or changing the process environment.
+This check is performed before upstream encoder construction and frame
+encoding. However, `rusty_vp9` reads many inherited `VP9_*` variables during
+configuration and encoding. These can change activity
 modeling, interpolation filters, trellis and transform search, partition and
 motion-search decisions, reference-chain behavior, and dispatch budgeting;
 debug/profiling switches can also add stderr output. Therefore the adapter's
 fixed `qindex` and `speed` settings do not by themselves guarantee identical
-encoder behavior across differently configured processes. The probe refuses
-to run when any `VP9_*` variable is set. Production callers should likewise
-control the process environment. File-output variables mentioned in the
-upstream source are confined to its test-only code and are not part of the
-normal downstream library path.
+encoder behavior across differently configured processes. Because the
+environment is process-wide and upstream reads some controls after the adapter
+check, concurrent mutation of `VP9_*` variables while an encoder is in use is
+outside this guard's guarantee. Keep those variables absent and the process
+environment stable for the encoder's lifetime; a complete library-level
+guarantee requires upstream to remove the implicit reads. The executable probe
+also refuses to run when any `VP9_*` variable is set. File-output variables
+mentioned in the upstream source are confined to its test-only code and are not
+part of the normal downstream library path.
 
 The retained upstream VP9 archive contains one embedded `keyframe.vp9`
 fixture, but it is profile 1 / RGB and does not exercise this adapter's

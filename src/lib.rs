@@ -33,6 +33,15 @@ pub const MAX_VIDEO_PACKET_BYTES: usize = 4 * 1024 * 1024;
 pub const MAX_VIDEO_FRAMES_PER_PACKET: usize = 2;
 const MAX_VIDEO_PIXELS: u64 = MAX_VIDEO_WIDTH as u64 * MAX_VIDEO_HEIGHT as u64;
 
+fn reject_vp9_environment_overrides() -> Result<(), CodecError> {
+    if std::env::vars_os().any(|(name, _)| name.to_string_lossy().starts_with("VP9_")) {
+        return Err(CodecError::InvalidInput(
+            "VP9_* environment overrides are unsupported by this encoder",
+        ));
+    }
+    Ok(())
+}
+
 /// Errors reported by the bounded adapters.
 #[derive(Debug)]
 pub enum CodecError {
@@ -172,6 +181,7 @@ impl Vp9Encoder {
     /// Create an encoder with no lookahead/two-pass buffering and a bounded
     /// realtime-oriented preset.
     pub fn new() -> Result<Self, CodecError> {
+        reject_vp9_environment_overrides()?;
         let mut inner = RustyVp9Encoder::default();
         inner.configure(&Vp9EncoderConfig {
             qindex: Some(96),
@@ -188,6 +198,7 @@ impl Vp9Encoder {
 
     /// Encode one bounded YUV 4:2:0 frame and return its coded VP9 packet.
     pub fn encode_frame(&mut self, frame: Yuv420Frame<'_>) -> Result<Vec<u8>, CodecError> {
+        reject_vp9_environment_overrides()?;
         if self.poisoned {
             return Err(CodecError::CodecStatePoisoned);
         }
@@ -446,12 +457,12 @@ fn preflight_vp9_frame(frame: &[u8]) -> Result<(), CodecError> {
         ));
     }
     validate_dimensions(header.width, header.height)?;
-    if header.key_frame || header.intra_only {
-        if header.bit_depth != 8 || header.subsampling_x != 1 || header.subsampling_y != 1 {
-            return Err(CodecError::InvalidInput(
-                "only 8-bit 4:2:0 VP9 is supported",
-            ));
-        }
+    if (header.key_frame || header.intra_only)
+        && (header.bit_depth != 8 || header.subsampling_x != 1 || header.subsampling_y != 1)
+    {
+        return Err(CodecError::InvalidInput(
+            "only 8-bit 4:2:0 VP9 is supported",
+        ));
     }
     Ok(())
 }
