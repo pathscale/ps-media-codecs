@@ -1,0 +1,11 @@
+[package]
+name = "ps-media-codecs"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "Apache-2.0"
+description = "Bounded pure-Rust Opus and VP9 codec adapters"
+
+[dependencies]
+rusty-opus = "1.0"
+rusty_vp9 = "0.1.1"
