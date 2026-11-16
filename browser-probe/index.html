@@ -1,0 +1,208 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>ps-media-codecs browser decode probe</title>
+    <style>
+      :root { color-scheme: light dark; font: 16px/1.5 system-ui, sans-serif; }
+      body { margin: 2rem auto; max-width: 52rem; padding: 0 1rem; }
+      button { font: inherit; padding: .5rem 1rem; }
+      pre { min-height: 8rem; overflow-wrap: anywhere; white-space: pre-wrap; }
+      .pass { color: #16803c; }
+      .fail { color: #c43131; }
+    </style>
+  </head>
+  <body>
+    <h1>Browser codec interoperability probe</h1>
+    <p>
+      This page decodes synthetic Opus and VP9 packets exported by the Rust probe with WebCodecs.
+      It does not request camera or microphone access and does not play or upload media.
+    </p>
+    <button id="run" type="button">Run browser decode</button>
+    <pre id="result" role="status" aria-live="polite">Ready. Serve this page and its data directory from one local origin.</pre>
+
+    <script type="module">
+      const runButton = document.querySelector("#run");
+      const result = document.querySelector("#result");
+
+      function fail(message) {
+        throw new Error(message);
+      }
+
+      async function fetchSequence(filename) {
+        const url = new URL(`./data/${filename}`, document.baseURI);
+        if (url.origin !== location.origin) {
+          fail("sequence fetch must stay on this page's origin");
+        }
+        const response = await fetch(url, { cache: "no-store", credentials: "same-origin" });
+        if (!response.ok) {
+          fail(`${filename}: HTTP ${response.status}`);
+        }
+        return response.json();
+      }
+
+      function checkDecoderErrors(label, errors) {
+        if (errors.length) {
+          fail(`${label}: ${errors.join("; ")}`);
+        }
+      }
+
+      async function decodeOpus(sequence) {
+        if (!("AudioDecoder" in window) || !("EncodedAudioChunk" in window)) {
+          fail("WebCodecs AudioDecoder is unavailable in this browser");
+        }
+        const errors = [];
+        let outputCount = 0;
+        let outputSamples = 0;
+        const outputChannels = new Set();
+        const config = {
+          codec: sequence.codec,
+          sampleRate: sequence.sampleRate,
+          numberOfChannels: sequence.channels,
+        };
+        const support = await AudioDecoder.isConfigSupported(config);
+        if (!support.supported) {
+          fail(`AudioDecoder does not support ${config.codec} at ${config.sampleRate} Hz / ${config.numberOfChannels} channels`);
+        }
+
+        const decoder = new AudioDecoder({
+          output(data) {
+            outputCount += 1;
+            outputSamples += data.numberOfFrames;
+            outputChannels.add(data.numberOfChannels);
+            if (data.sampleRate !== sequence.sampleRate) {
+              errors.push(`unexpected output sample rate ${data.sampleRate}`);
+            }
+            data.close();
+          },
+          error(error) {
+            errors.push(`${error.name}: ${error.message}`);
+          },
+        });
+
+        try {
+          decoder.configure(support.config ?? config);
+          for (const packet of sequence.frames) {
+            decoder.decode(new EncodedAudioChunk({
+              type: packet.type,
+              timestamp: packet.timestamp,
+              duration: packet.duration,
+              data: Uint8Array.from(packet.data),
+            }));
+          }
+          await decoder.flush();
+          checkDecoderErrors("Opus decoder", errors);
+          if (outputCount !== sequence.frames.length) {
+            fail(`Opus output ${outputCount} AudioData objects for ${sequence.frames.length} packets`);
+          }
+          const expectedSamples = sequence.frames.length * sequence.sampleRate * 20 / 1000;
+          if (outputSamples !== expectedSamples) {
+            fail(`Opus output ${outputSamples} samples per channel; expected ${expectedSamples}`);
+          }
+          if (outputChannels.size !== 1 || !outputChannels.has(sequence.channels)) {
+            fail(`Opus output channel counts ${[...outputChannels].join(",") || "none"}; expected ${sequence.channels}`);
+          }
+          return `Opus PASS: packets=${sequence.frames.length}, AudioData=${outputCount}, samples/channel=${outputSamples}, channels=${sequence.channels}`;
+        } finally {
+          if (decoder.state !== "closed") decoder.close();
+        }
+      }
+
+      async function decodeVp9(sequence) {
+        if (!("VideoDecoder" in window) || !("EncodedVideoChunk" in window)) {
+          fail("WebCodecs VideoDecoder is unavailable in this browser");
+        }
+        const errors = [];
+        const frameIssues = [];
+        let outputCount = 0;
+        const dimensions = new Set();
+        const config = {
+          codec: sequence.codec,
+          codedWidth: sequence.width,
+          codedHeight: sequence.height,
+          hardwareAcceleration: "prefer-software",
+        };
+        const support = await VideoDecoder.isConfigSupported(config);
+        if (!support.supported) {
+          fail(`VideoDecoder does not support ${config.codec}`);
+        }
+
+        const decoder = new VideoDecoder({
+          output(frame) {
+            outputCount += 1;
+            const coded = `${frame.codedWidth}x${frame.codedHeight}`;
+            const visible = frame.visibleRect;
+            if (!visible) {
+              dimensions.add(`coded=${coded}; visible=none; display=${frame.displayWidth}x${frame.displayHeight}`);
+              frameIssues.push("VideoFrame has no visibleRect");
+            } else {
+              const visibleSize = `${visible.width}x${visible.height}`;
+              const visibleRect = `${visible.x},${visible.y},${visible.width},${visible.height}`;
+              const display = `${frame.displayWidth}x${frame.displayHeight}`;
+              dimensions.add(`coded=${coded}; visible=${visibleRect}; display=${display}`);
+              if (visible.width !== sequence.width || visible.height !== sequence.height) {
+                frameIssues.push(`visible size ${visibleSize}; expected ${sequence.width}x${sequence.height}`);
+              }
+              if (
+                visible.x < 0 || visible.y < 0 ||
+                visible.x + visible.width > frame.codedWidth ||
+                visible.y + visible.height > frame.codedHeight
+              ) {
+                frameIssues.push(`visibleRect ${visibleRect} exceeds coded size ${coded}`);
+              }
+              if (frame.displayWidth !== sequence.width || frame.displayHeight !== sequence.height) {
+                frameIssues.push(`display size ${display}; expected ${sequence.width}x${sequence.height}`);
+              }
+            }
+            frame.close();
+          },
+          error(error) {
+            errors.push(`${error.name}: ${error.message}`);
+          },
+        });
+
+        try {
+          decoder.configure(support.config ?? config);
+          for (const packet of sequence.frames) {
+            decoder.decode(new EncodedVideoChunk({
+              type: packet.type,
+              timestamp: packet.timestamp,
+              duration: packet.duration,
+              data: Uint8Array.from(packet.data),
+            }));
+          }
+          await decoder.flush();
+          checkDecoderErrors("VP9 decoder", errors);
+          if (outputCount !== sequence.frames.length) {
+            fail(`VP9 output ${outputCount} VideoFrame objects for ${sequence.frames.length} packets`);
+          }
+          if (frameIssues.length) {
+            fail(`VP9 frame properties: ${frameIssues.join("; ")}. Observed ${[...dimensions].join(" | ") || "no frames"}`);
+          }
+          return `VP9 PASS: packets=${sequence.frames.length}, VideoFrame=${outputCount}, ${[...dimensions].join(" | ")}`;
+        } finally {
+          if (decoder.state !== "closed") decoder.close();
+        }
+      }
+
+      runButton.addEventListener("click", async () => {
+        runButton.disabled = true;
+        result.className = "";
+        result.textContent = "Loading synthetic packet sequences…";
+        try {
+          const opus = await fetchSequence("opus-sequence.json");
+          const vp9 = await fetchSequence("vp9-sequence.json");
+          const lines = [await decodeOpus(opus), await decodeVp9(vp9)];
+          result.className = "pass";
+          result.textContent = `PASS\n${lines.join("\n")}\nDecoded frames were closed immediately.`;
+        } catch (error) {
+          result.className = "fail";
+          result.textContent = `FAIL\n${error.name ?? "Error"}: ${error.message ?? String(error)}`;
+        } finally {
+          runButton.disabled = false;
+        }
+      });
+    </script>
+  </body>
+</html>
